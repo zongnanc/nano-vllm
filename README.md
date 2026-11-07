@@ -60,6 +60,14 @@ See `bench.py` for benchmark.
 | vLLM           | 133,966     | 98.37    | 1361.84               |
 | Nano-vLLM      | 133,966     | 93.41    | 1434.13               |
 
+## Tests
+
+The scheduler, block manager and sequence logic is tested on CPU, no GPU needed:
+```bash
+pip install pytest numpy xxhash
+pytest
+```
+
 
 ## Star History
 
