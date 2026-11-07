@@ -11,7 +11,6 @@ class Scheduler:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
-        self.block_size = config.kvcache_block_size
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -24,53 +23,44 @@ class Scheduler:
 
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
-        num_batched_tokens = 0
+        token_budget = self.max_num_batched_tokens
+        preempted = False
 
-        # prefill
-        while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
-            seq = self.waiting[0]
-            remaining = self.max_num_batched_tokens - num_batched_tokens
-            if remaining == 0:
-                break
-            if not seq.block_table:
-                num_cached_blocks = self.block_manager.can_allocate(seq)
-                if num_cached_blocks == -1:
-                    break
-                num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
-            else:
-                num_tokens = seq.num_tokens - seq.num_cached_tokens
-            if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
-                break
-            if not seq.block_table:
-                self.block_manager.allocate(seq, num_cached_blocks)
-            seq.num_scheduled_tokens = min(num_tokens, remaining)
-            num_batched_tokens += seq.num_scheduled_tokens
-            if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
-                seq.status = SequenceStatus.RUNNING
-                self.waiting.popleft()
-                self.running.append(seq)
-            scheduled_seqs.append(seq)
-
-        if scheduled_seqs:
-            return scheduled_seqs, True
-
-        # decode
-        while self.running and len(scheduled_seqs) < self.max_num_seqs:
+        # running: each seq decodes one token, or prefills its next chunk if its prompt isn't done yet
+        while self.running and token_budget > 0:
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
+                preempted = True
                 if self.running:
                     self.preempt(self.running.pop())
                 else:
                     self.preempt(seq)
                     break
             else:
-                seq.num_scheduled_tokens = 1
-                seq.is_prefill = False
                 self.block_manager.may_append(seq)
+                num_tokens = seq.num_tokens - seq.num_cached_tokens
+                seq.is_prefill = num_tokens > 1
+                seq.num_scheduled_tokens = min(num_tokens, token_budget)
+                token_budget -= seq.num_scheduled_tokens
                 scheduled_seqs.append(seq)
-        assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))
-        return scheduled_seqs, False
+
+        # waiting: prefill new prompts with the leftover budget; the last one may get only a chunk
+        while self.waiting and token_budget > 0 and len(self.running) < self.max_num_seqs and not preempted:
+            seq = self.waiting[0]
+            num_cached_blocks = self.block_manager.can_allocate(seq)
+            if num_cached_blocks == -1:
+                break
+            self.block_manager.allocate(seq, num_cached_blocks)
+            seq.num_scheduled_tokens = min(seq.num_tokens - seq.num_cached_tokens, token_budget)
+            token_budget -= seq.num_scheduled_tokens
+            seq.status = SequenceStatus.RUNNING
+            self.waiting.popleft()
+            self.running.append(seq)
+            scheduled_seqs.append(seq)
+
+        assert scheduled_seqs
+        return scheduled_seqs, any(seq.is_prefill for seq in scheduled_seqs)
 
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
