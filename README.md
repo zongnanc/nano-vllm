@@ -60,6 +60,11 @@ See `bench.py` for benchmark.
 | vLLM           | 133,966     | 98.37    | 1361.84               |
 | Nano-vLLM      | 133,966     | 93.41    | 1434.13               |
 
+`bench.py` sends every request at once. To measure serving latency, `bench_online.py` runs the same workload with requests arriving over time and reports time to first token (TTFT) and inter-token latency (ITL):
+```bash
+python bench_online.py --request-rate 4    # Poisson arrivals, requests/s
+```
+
 ## Tests
 
 The scheduler, block manager and sequence logic is tested on CPU, no GPU needed:
