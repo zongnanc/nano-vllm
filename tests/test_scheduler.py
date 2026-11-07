@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from nanovllm.engine.block_manager import BlockManager
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.sequence import Sequence
 from nanovllm.sampling_params import SamplingParams
@@ -65,7 +66,7 @@ def step(scheduler, sample=lambda seq: TOKEN):
         # every token computed this step needs a KV-cache slot
         assert len(seq.block_table) * BLOCK_SIZE >= seq.num_cached_tokens + seq.num_scheduled_tokens
     batch = [(seq, seq.num_cached_tokens, seq.num_scheduled_tokens) for seq in seqs]
-    scheduler.postprocess(seqs, [sample(seq) for seq in seqs], is_prefill)
+    scheduler.postprocess(seqs, [sample(seq) for seq in seqs])
     check_block_accounting(scheduler)
     return batch
 
@@ -167,3 +168,29 @@ def test_batches_respect_max_num_seqs():
     steps = run(scheduler, seqs)
     assert max(len(batch) for batch in steps) == 4
     assert all(seq.is_finished for seq in seqs)
+
+
+def test_decode_gets_a_new_block_only_when_its_token_starts_one():
+    bm = BlockManager(num_blocks=2, block_size=BLOCK_SIZE)
+    seq = make_seq(4, 10)    # the prompt fills block 0 exactly
+    bm.allocate(seq, bm.can_allocate(seq))
+    seq.append_token(TOKEN)    # token 5 goes in a new block
+    assert bm.can_append(seq)
+    bm.may_append(seq)
+    assert len(seq.block_table) == 2
+    seq.append_token(TOKEN)    # token 6 fits in block 1
+    assert bm.can_append(seq)
+    bm.may_append(seq)
+    assert len(seq.block_table) == 2
+    seq.append_token(TOKEN), seq.append_token(TOKEN), seq.append_token(TOKEN)    # token 9 needs a third block
+    assert not bm.can_append(seq)
+
+
+def test_chunked_prefill_already_has_all_its_blocks():
+    bm = BlockManager(num_blocks=3, block_size=BLOCK_SIZE)
+    seq = make_seq(9, 10)    # 9 % BLOCK_SIZE == 1, but allocate() reserved blocks for all 9 tokens
+    bm.allocate(seq, bm.can_allocate(seq))
+    assert len(seq.block_table) == 3 and not bm.free_block_ids
+    assert bm.can_append(seq)
+    bm.may_append(seq)
+    assert len(seq.block_table) == 3
