@@ -14,7 +14,7 @@ A lightweight vLLM implementation built from scratch.
 
 * 🚀 **Fast offline inference** - Comparable inference speeds to vLLM
 * 📖 **Readable codebase** - Clean implementation in ~ 1,200 lines of Python code
-* ⚡ **Optimization Suite** - Prefix caching, Tensor Parallelism, Torch compilation, CUDA graph, etc.
+* ⚡ **Optimization Suite** - Prefix caching, Chunked prefill mixed with decode, Tensor Parallelism, Torch compilation, CUDA graph, etc.
 
 ## Installation
 
@@ -42,6 +42,12 @@ prompts = ["Hello, Nano-vLLM."]
 outputs = llm.generate(prompts, sampling_params)
 outputs[0]["text"]
 ```
+
+## Scheduling
+
+Each step first gives every running sequence its next token, or the next chunk of a prompt that is still being prefilled. It then spends what is left of `max_num_batched_tokens` prefilling waiting prompts, cutting the last one into a chunk if it doesn't fit. Prefill and decode share one forward pass, so running sequences keep generating while new requests are prefilled. Steps that only decode use CUDA graphs.
+
+A smaller `max_num_batched_tokens` keeps inter-token latency low while prompts are being prefilled. A larger one prefills faster.
 
 ## Benchmark
 

@@ -170,6 +170,70 @@ def test_batches_respect_max_num_seqs():
     assert all(seq.is_finished for seq in seqs)
 
 
+def test_running_sequences_keep_decoding_while_a_long_prompt_is_prefilled():
+    scheduler = make_scheduler(max_num_batched_tokens=16)
+    decoding = make_seq(4, 20)
+    scheduler.add(decoding)
+    step(scheduler)
+    long_prompt = make_seq(50, 2, start=100)
+    scheduler.add(long_prompt)
+    chunks = []
+    while long_prompt.num_completion_tokens == 0:
+        scheduled = {seq: num_tokens for seq, _, num_tokens in step(scheduler)}
+        assert scheduled.keys() == {decoding, long_prompt}
+        assert scheduled[decoding] == 1
+        chunks.append(scheduled[long_prompt])
+    assert chunks == [15, 15, 15, 5]    # the decode token uses 1 of the 16-token budget
+
+
+def test_mixed_steps_take_the_prefill_path_and_decode_only_steps_do_not():
+    scheduler = make_scheduler()
+    first, second = make_seq(4, 3), make_seq(6, 3, start=50)
+    scheduler.add(first)
+    seqs, is_prefill = scheduler.schedule()
+    assert seqs == [first] and is_prefill
+    scheduler.postprocess(seqs, [TOKEN])
+    scheduler.add(second)
+    seqs, is_prefill = scheduler.schedule()
+    assert seqs == [first, second] and is_prefill    # one forward pass: first decodes, second prefills
+    assert not first.is_prefill and second.is_prefill
+    scheduler.postprocess(seqs, [TOKEN, TOKEN])
+    seqs, is_prefill = scheduler.schedule()
+    assert seqs == [first, second] and not is_prefill    # decode only, so the CUDA graph path
+
+
+def test_every_running_sequence_is_scheduled_every_step():
+    rng = random.Random(1)
+    max_num_seqs = 6
+    scheduler = make_scheduler(num_blocks=200, max_num_seqs=max_num_seqs, max_num_batched_tokens=16)
+    for _ in range(30):
+        scheduler.add(make_seq(rng.randint(1, 40), rng.randint(1, 20), start=rng.choice([1, 1000])))
+    while not scheduler.is_finished():
+        running = set(scheduler.running)
+        batch = step(scheduler)
+        assert running <= {seq for seq, _, _ in batch}    # the cache is big enough that nothing is preempted
+        assert len(scheduler.running) <= max_num_seqs
+        assert sum(seq.num_cached_tokens < seq.num_tokens - 1 for seq in scheduler.running) <= 1    # unfinished prefills
+
+
+def test_newest_sequence_is_preempted_first_and_not_readmitted_in_the_same_step():
+    scheduler = make_scheduler(num_blocks=6, max_num_batched_tokens=8)
+    first, second = make_seq(6, 10), make_seq(16, 2, start=100)
+    scheduler.add(first)
+    step(scheduler)    # first prefills into 2 of the 6 blocks
+    scheduler.add(second)
+    step(scheduler)    # first decodes; second takes the other 4 blocks and prefills a chunk
+    step(scheduler)    # another chunk; second's prompt still isn't done
+    assert 0 < second.num_cached_tokens < second.num_tokens - 1 and not scheduler.block_manager.free_block_ids
+    assert len(first) == 9    # first kept decoding while second prefilled; its next token needs a 3rd block
+    batch = step(scheduler)    # no block is free, so second, the newest, is preempted mid-prefill
+    assert [seq for seq, _, _ in batch] == [first]
+    assert list(scheduler.waiting) == [second] and not second.block_table and second.num_cached_tokens == 0
+    run(scheduler)
+    assert first.completion_token_ids == [TOKEN] * 10 and second.completion_token_ids == [TOKEN] * 2
+    assert_all_blocks_free(scheduler)
+
+
 def test_decode_gets_a_new_block_only_when_its_token_starts_one():
     bm = BlockManager(num_blocks=2, block_size=BLOCK_SIZE)
     seq = make_seq(4, 10)    # the prompt fills block 0 exactly
