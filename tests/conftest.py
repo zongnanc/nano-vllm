@@ -16,7 +16,8 @@ if "nanovllm" not in sys.modules:
 try:
     import transformers  # noqa: F401
 except ImportError:
-    # nanovllm/config.py imports AutoConfig; the scheduler only uses Config as a type hint.
+    # nanovllm/config.py imports AutoConfig and evaluates `AutoConfig | None` at class definition,
+    # so the stub must be a class. The scheduler only uses Config as a type hint.
     transformers = types.ModuleType("transformers")
-    transformers.AutoConfig = None
+    transformers.AutoConfig = type("AutoConfig", (), {})
     sys.modules["transformers"] = transformers
