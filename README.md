@@ -89,6 +89,24 @@ python bench_online.py --request-rate 4    # Poisson arrivals, requests/s
 
 Throughput is unchanged. Inter-token latency p99 drops 20–26% because running sequences no longer stall while a new prompt is prefilled. Time to first token rises at 8 req/s because a step containing prefill runs eager (no CUDA graph) and takes longer than a pure decode step.
 
+### Tensor parallelism
+
+See `bench_tp.py` for the same workload with `--tp N` and `--max-num-seqs`.
+
+**Test Configuration:**
+- Hardware: 4x NVIDIA A10G (24GB), g5.12xlarge, PCIe (no NVLink)
+- Model: Qwen3-0.6B
+- Workload: same as above
+
+**Performance Results:**
+| TP | Throughput (tokens/s), max_num_seqs=512 | Throughput (tokens/s), max_num_seqs=128 |
+|----|------------------------------------------|------------------------------------------|
+| 1  | 3092                                     | 3108                                     |
+| 2  | 3443                                     | 3122                                     |
+| 4  | 3959                                     | 3706                                     |
+
+At TP=1 the KV cache holds about 150 of the 256 sequences, so capping the batch at 128 changes nothing. TP=2 doubles KV capacity, which is where its entire gain comes from: at an equal batch of 128 it ties TP=1, because halving each GPU's memory reads saves about as much as the 56 PCIe all-reduces per step cost. TP=4 gains at an equal batch as well, since quartering the reads outweighs the all-reduce cost, which is latency-bound and stays roughly flat from TP=2 to TP=4.
+
 ## Tests
 
 The scheduler, block manager and sequence logic is tested on CPU, no GPU needed:
