@@ -71,6 +71,24 @@ See `bench.py` for benchmark.
 python bench_online.py --request-rate 4    # Poisson arrivals, requests/s
 ```
 
+**Test Configuration:**
+- Hardware: NVIDIA A10G (24GB)
+- Model: Qwen3-0.6B
+- Workload: same as above, `max_num_batched_tokens=16384`
+- Baseline: prefill-first scheduler (upstream `bb823b3`); Mixed: prefill and decode in the same step (this fork)
+
+**Performance Results:**
+| Rate (req/s) | Scheduler | Throughput (tokens/s) | Time to first token, p50 (ms) | Inter-token latency, p99 (ms) |
+|--------------|-----------|-----------------------|-------------------------------|-------------------------------|
+| offline      | Baseline  | 3088                  | –                             | –                             |
+| offline      | Mixed     | 3019                  | –                             | –                             |
+| 4            | Baseline  | 1790                  | 35.9                          | 42.7                          |
+| 4            | Mixed     | 1795                  | 36.2                          | 31.4                          |
+| 8            | Baseline  | 2670                  | 41.4                          | 86.2                          |
+| 8            | Mixed     | 2684                  | 59.9                          | 69.1                          |
+
+Throughput is unchanged. Inter-token latency p99 drops 20–26% because running sequences no longer stall while a new prompt is prefilled. Time to first token rises at 8 req/s because a step containing prefill runs eager (no CUDA graph) and takes longer than a pure decode step.
+
 ## Tests
 
 The scheduler, block manager and sequence logic is tested on CPU, no GPU needed:
